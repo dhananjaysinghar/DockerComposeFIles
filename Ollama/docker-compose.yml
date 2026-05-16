@@ -1,0 +1,43 @@
+services:
+  ollama:
+    image: ollama/ollama:latest
+    container_name: ollama
+    ports:
+      - "11434:11434"
+    volumes:
+      - ollama_data:/root/.ollama
+    networks:
+      - ai-network
+    restart: unless-stopped
+
+  open-webui:
+    image: ghcr.io/open-webui/open-webui:main
+    container_name: open-webui
+    depends_on:
+      - ollama
+    ports:
+      - "3000:8080"
+    environment:
+      - OLLAMA_BASE_URL=http://ollama:11434
+    volumes:
+      - open_webui_data:/app/backend/data
+    networks:
+      - ai-network
+    restart: unless-stopped
+
+volumes:
+  ollama_data:
+  open_webui_data:
+
+networks:
+  ai-network:
+    driver: bridge
+
+# RUN CONTAINERS
+# docker compose up -d    
+
+# DOWNLOAD MODELS    
+# docker exec -it ollama ollama pull qwen3-coder:30b     ## For Software Developer (Coding)
+# docker exec -it ollama ollama pull qwen3.6             ## For Senior architect / AI assistant
+
+# docker exec -it ollama ollama rm qwen3.6
