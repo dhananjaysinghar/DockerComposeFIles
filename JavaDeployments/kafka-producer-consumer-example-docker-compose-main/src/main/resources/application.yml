@@ -1,0 +1,10 @@
+app:
+  kafka:
+    enabled: true
+    host: ${kafka_bootstrap_servers:localhost:9092}
+    topic: test_topic
+    max-poll-record: 1000
+    consumer-group-id: user-consumer-test
+
+server:
+  port: 8080
