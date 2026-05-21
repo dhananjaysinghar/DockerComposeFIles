@@ -15,3 +15,6 @@ project/
 └── plugins/
 
 ~~~
+
+
+<img width="1998" height="851" alt="image" src="https://github.com/user-attachments/assets/ccc3d257-b839-4d0a-8567-686c077b5d72" />
