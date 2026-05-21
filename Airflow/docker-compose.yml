@@ -9,11 +9,21 @@ services:
         - POSTGRES_DB=airflow
       volumes:
         - postgresdb:/var/lib/postgresql/data
+      healthcheck:
+        test: ["CMD-SHELL", "pg_isready -U airflow -d airflow"]
+        interval: 30s
+        timeout: 10s
+        retries: 3
 
     redis:
       image: redis:latest
       ports:
         - "6379:6379"
+      healthcheck:
+        test: ["CMD", "redis-cli", "ping"]
+        interval: 30s
+        timeout: 10s
+        retries: 3
 
     airflow-webserver:
       image: apache/airflow:2.4.1
@@ -21,15 +31,29 @@ services:
         - postgres_db
         - redis
       environment:
+        - AIRFLOW__CORE__EXECUTOR=CeleryExecutor
         - AIRFLOW__CORE__SQL_ALCHEMY_CONN=postgresql+psycopg2://airflow:airflow@postgres_db/airflow
         - AIRFLOW__CELERY__RESULT_BACKEND=redis://redis:6379/0
         - AIRFLOW__WEBSERVER__EXPOSE_HOST_ALL=False
+        - AIRFLOW__CORE__FERNET_KEY=1234567890123456789012345678901234567890
+        - LOAD_EXAMPLES=True
       ports:
         - "8080:8080"
       volumes:
         - ./dags:/opt/airflow/dags
         - ./plugins:/opt/airflow/plugins
-      command: webserver
+        - ./entrypoint.sh:/entrypoint.sh
+      command: >
+        bash -c "
+          chmod +x /entrypoint.sh &&
+          /entrypoint.sh
+        "
+      restart: unless-stopped
+      healthcheck:
+        test: ["CMD", "curl", "-f", "http://localhost:8080/health"]
+        interval: 30s
+        timeout: 10s
+        retries: 3
 
     airflow-scheduler:
       image: apache/airflow:2.4.1
@@ -37,12 +61,20 @@ services:
         - postgres_db
         - redis
       environment:
+        - AIRFLOW__CORE__EXECUTOR=CeleryExecutor
         - AIRFLOW__CORE__SQL_ALCHEMY_CONN=postgresql+psycopg2://airflow:airflow@postgres_db/airflow
         - AIRFLOW__CELERY__RESULT_BACKEND=redis://redis:6379/0
+        - AIRFLOW__CELERY__BROKER_URL=redis://redis:6379/0
       volumes:
         - ./dags:/opt/airflow/dags
         - ./plugins:/opt/airflow/plugins
       command: scheduler
+      restart: unless-stopped
+      healthcheck:
+        test: ["CMD", "python", "-c", "import airflow; print('Scheduler is running')"]
+        interval: 30s
+        timeout: 10s
+        retries: 3
 
     airflow-worker:
       image: apache/airflow:2.4.1
@@ -50,12 +82,20 @@ services:
         - postgres_db
         - redis
       environment:
+        - AIRFLOW__CORE__EXECUTOR=CeleryExecutor
         - AIRFLOW__CORE__SQL_ALCHEMY_CONN=postgresql+psycopg2://airflow:airflow@postgres_db/airflow
         - AIRFLOW__CELERY__RESULT_BACKEND=redis://redis:6379/0
+        - AIRFLOW__CELERY__BROKER_URL=redis://redis:6379/0
       volumes:
         - ./dags:/opt/airflow/dags
         - ./plugins:/opt/airflow/plugins
       command: celery worker
+      restart: unless-stopped
+      healthcheck:
+        test: ["CMD", "python", "-c", "import airflow; print('Worker is running')"]
+        interval: 30s
+        timeout: 10s
+        retries: 3
 
 volumes:
   postgresdb:
