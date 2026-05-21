@@ -1,24 +1,38 @@
-version: '3.8'
-
-x-airflow-common: &airflow-common
+x-airflow-common:
+  &airflow-common
   build: .
-  environment: &airflow-env
+  # image: ${AIRFLOW_IMAGE_NAME:-apache/airflow:3.1.6}
+  # env_file:
+  #   - ${ENV_FILE_PATH:-.env}
+  environment:
+    &airflow-common-env
     AIRFLOW__CORE__EXECUTOR: CeleryExecutor
+    AIRFLOW__CORE__AUTH_MANAGER: airflow.providers.fab.auth_manager.fab_auth_manager.FabAuthManager
     AIRFLOW__DATABASE__SQL_ALCHEMY_CONN: postgresql+psycopg2://airflow:airflow@postgres/airflow
-    AIRFLOW__CELERY__BROKER_URL: redis://redis:6379/0
     AIRFLOW__CELERY__RESULT_BACKEND: db+postgresql://airflow:airflow@postgres/airflow
-    AIRFLOW__CORE__FERNET_KEY: "6tCbbQdW_VyQAVDsYiwGm0hD59mPEUrZBhexfdSjFQ0="
-    AIRFLOW__CORE__LOAD_EXAMPLES: "True"
-    AIRFLOW__API__AUTH_BACKENDS: airflow.api.auth.backend.basic_auth
-    AIRFLOW_UID: 50000
+    AIRFLOW__CELERY__BROKER_URL: redis://:@redis:6379/0
+    AIRFLOW__CORE__FERNET_KEY: ''
+    AIRFLOW__CORE__DAGS_ARE_PAUSED_AT_CREATION: 'true'
+    AIRFLOW__CORE__LOAD_EXAMPLES: 'false'
+    AIRFLOW__CORE__EXECUTION_API_SERVER_URL: 'http://airflow-apiserver:8080/execution/'
+    AIRFLOW__SCHEDULER__ENABLE_HEALTH_CHECK: 'true'
+    AIRFLOW_CONFIG: '/opt/airflow/config/airflow.cfg'
   volumes:
-    - ./dags:/opt/airflow/dags
-    - ./logs:/opt/airflow/logs
-    - ./plugins:/opt/airflow/plugins
+    - ${AIRFLOW_PROJ_DIR:-.}/dags:/opt/airflow/dags
+    - ${AIRFLOW_PROJ_DIR:-.}/logs:/opt/airflow/logs
+    - ${AIRFLOW_PROJ_DIR:-.}/config:/opt/airflow/config
+    - ${AIRFLOW_PROJ_DIR:-.}/plugins:/opt/airflow/plugins
+  user: "${AIRFLOW_UID:-50000}:0"
+  depends_on:
+    &airflow-common-depends-on
+    redis:
+      condition: service_healthy
+    postgres:
+      condition: service_healthy
 
 services:
   postgres:
-    image: postgres:13
+    image: postgres:16
     container_name: airflow-postgres
     environment:
       POSTGRES_USER: airflow
@@ -26,6 +40,8 @@ services:
       POSTGRES_DB: airflow
     volumes:
       - postgres-db-volume:/var/lib/postgresql/data
+    ports:
+      - "5432:5432"
     healthcheck:
       test: ["CMD-SHELL", "pg_isready -U airflow"]
       interval: 10s
@@ -57,45 +73,131 @@ services:
     command:
       - -c
       - |
-        airflow db migrate
+        echo "Creating missing opt dirs if missing:"
+        echo
+        mkdir -v -p /opt/airflow/{logs,dags,plugins,config}
+        echo
+        echo "Airflow version:"
+        /entrypoint airflow version
+        echo
+        echo "Files in shared volumes:"
+        echo
+        ls -la /opt/airflow/{logs,dags,plugins,config}
+        echo
+        echo "Running airflow config list to create default config file if missing."
+        echo
+        /entrypoint airflow config list >/dev/null
+        echo
+        echo "Files in shared volumes:"
+        echo
+        ls -la /opt/airflow/{logs,dags,plugins,config}
+        echo
 
-        airflow users create \
-          --username admin \
-          --password admin \
-          --firstname Airflow \
-          --lastname Admin \
-          --role Admin \
-          --email admin@example.com || true
+    environment:
+      <<: *airflow-common-env
+      _AIRFLOW_DB_MIGRATE: 'true'
+      _AIRFLOW_WWW_USER_CREATE: 'true'
+      _AIRFLOW_WWW_USER_USERNAME: ${_AIRFLOW_WWW_USER_USERNAME:-admin}
+      _AIRFLOW_WWW_USER_PASSWORD: ${_AIRFLOW_WWW_USER_PASSWORD:-admin}
+      _PIP_ADDITIONAL_REQUIREMENTS: ''
+    user: "0:0"
 
-  airflow-webserver:
+
+  airflow-apiserver:
     <<: *airflow-common
-    container_name: airflow-webserver
-    depends_on:
-      - airflow-init
+    command: api-server
     ports:
       - "8080:8080"
-    command: airflow webserver
     healthcheck:
-      test: ["CMD", "curl", "--fail", "http://localhost:8080/health"]
+      test: ["CMD", "curl", "--fail", "http://localhost:8080/api/v2/version"]
       interval: 30s
       timeout: 10s
       retries: 5
-    restart: unless-stopped
+      start_period: 30s
+    restart: always
+    depends_on:
+      <<: *airflow-common-depends-on
+      airflow-init:
+        condition: service_completed_successfully
+
+
 
   airflow-scheduler:
     <<: *airflow-common
-    container_name: airflow-scheduler
+    command: scheduler
+    healthcheck:
+      test: ["CMD", "curl", "--fail", "http://localhost:8974/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 5
+      start_period: 30s
+    restart: always
     depends_on:
-      - airflow-init
-    command: airflow scheduler
-    restart: unless-stopped
+      <<: *airflow-common-depends-on
+      airflow-init:
+        condition: service_completed_successfully
+
+
+
+  airflow-dag-processor:
+    <<: *airflow-common
+    command: dag-processor
+    healthcheck:
+      test: ["CMD-SHELL", 'airflow jobs check --job-type DagProcessorJob --hostname "$${HOSTNAME}"']
+      interval: 30s
+      timeout: 10s
+      retries: 5
+      start_period: 30s
+    restart: always
+    depends_on:
+      <<: *airflow-common-depends-on
+      airflow-init:
+        condition: service_completed_successfully
+
+
+
   airflow-worker:
     <<: *airflow-common
-    container_name: airflow-worker
+    command: celery worker
+    healthcheck:
+      # yamllint disable rule:line-length
+      test:
+        - "CMD-SHELL"
+        - 'celery --app airflow.providers.celery.executors.celery_executor.app inspect ping -d "celery@$${HOSTNAME}" || celery --app airflow.executors.celery_executor.app inspect ping -d "celery@$${HOSTNAME}"'
+      interval: 30s
+      timeout: 10s
+      retries: 5
+      start_period: 30s
+    environment:
+      <<: *airflow-common-env
+      # Required to handle warm shutdown of the celery workers properly
+      # See https://airflow.apache.org/docs/docker-stack/entrypoint.html#signal-propagation
+      DUMB_INIT_SETSID: "0"
+    restart: always
     depends_on:
-      - airflow-init
-    command: airflow celery worker
-    restart: unless-stopped
+      <<: *airflow-common-depends-on
+      airflow-apiserver:
+        condition: service_healthy
+      airflow-init:
+        condition: service_completed_successfully
+
+
+
+  airflow-triggerer:
+    <<: *airflow-common
+    command: triggerer
+    healthcheck:
+      test: ["CMD-SHELL", 'airflow jobs check --job-type TriggererJob --hostname "$${HOSTNAME}"']
+      interval: 30s
+      timeout: 10s
+      retries: 5
+      start_period: 30s
+    restart: always
+    depends_on:
+      <<: *airflow-common-depends-on
+      airflow-init:
+        condition: service_completed_successfully
+
 volumes:
   postgres-db-volume:
 
@@ -107,158 +209,3 @@ volumes:
 # docker compose down
 
 
-
-
-
-
-
-
-# services:
-
-#   postgres:
-#     image: postgres:13
-#     container_name: airflow-postgres
-#     environment:
-#       POSTGRES_USER: airflow
-#       POSTGRES_PASSWORD: airflow
-#       POSTGRES_DB: airflow
-#     volumes:
-#       - postgres-db-volume:/var/lib/postgresql/data
-#     healthcheck:
-#       test: ["CMD-SHELL", "pg_isready -U airflow"]
-#       interval: 10s
-#       timeout: 5s
-#       retries: 5
-#     restart: unless-stopped
-
-#   redis:
-#     image: redis:7
-#     container_name: airflow-redis
-#     ports:
-#       - "6379:6379"
-#     healthcheck:
-#       test: ["CMD", "redis-cli", "ping"]
-#       interval: 10s
-#       timeout: 5s
-#       retries: 5
-#     restart: unless-stopped
-
-#   airflow-init:
-#     image: apache/airflow:2.9.3
-#     container_name: airflow-init
-
-#     entrypoint: /bin/bash
-
-#     depends_on:
-#       postgres:
-#         condition: service_healthy
-#       redis:
-#         condition: service_healthy
-
-#     environment:
-#       AIRFLOW__CORE__EXECUTOR: CeleryExecutor
-#       AIRFLOW__DATABASE__SQL_ALCHEMY_CONN: postgresql+psycopg2://airflow:airflow@postgres/airflow
-#       AIRFLOW__CELERY__BROKER_URL: redis://redis:6379/0
-#       AIRFLOW__CELERY__RESULT_BACKEND: db+postgresql://airflow:airflow@postgres/airflow
-#       AIRFLOW__CORE__FERNET_KEY: "6tCbbQdW_VyQAVDsYiwGm0hD59mPEUrZBhexfdSjFQ0="
-#       AIRFLOW_UID: 50000
-
-#     command:
-#       - -c
-#       - |
-#         airflow db migrate
-
-#         airflow users create \
-#           --username admin \
-#           --password admin \
-#           --firstname Airflow \
-#           --lastname Admin \
-#           --role Admin \
-#           --email admin@example.com || true
-
-#     volumes:
-#       - ./dags:/opt/airflow/dags
-#       - ./logs:/opt/airflow/logs
-#       - ./plugins:/opt/airflow/plugins
-
-#   airflow-webserver:
-#     image: apache/airflow:2.9.3
-#     container_name: airflow-webserver
-
-#     depends_on:
-#       - airflow-init
-
-#     environment:
-#       AIRFLOW__CORE__EXECUTOR: CeleryExecutor
-#       AIRFLOW__DATABASE__SQL_ALCHEMY_CONN: postgresql+psycopg2://airflow:airflow@postgres/airflow
-#       AIRFLOW__CELERY__BROKER_URL: redis://redis:6379/0
-#       AIRFLOW__CELERY__RESULT_BACKEND: db+postgresql://airflow:airflow@postgres/airflow
-#       AIRFLOW__CORE__FERNET_KEY: "6tCbbQdW_VyQAVDsYiwGm0hD59mPEUrZBhexfdSjFQ0="
-#       #python -c "from cryptography.fernet import Fernet; print(Fernet.generate_key().decode())"                
-#       AIRFLOW__CORE__LOAD_EXAMPLES: "True"
-#       AIRFLOW__API__AUTH_BACKENDS: airflow.api.auth.backend.basic_auth
-#       AIRFLOW_UID: 50000
-
-#     ports:
-#       - "8080:8080"
-#     command: webserver
-#     volumes:
-#       - ./dags:/opt/airflow/dags
-#       - ./logs:/opt/airflow/logs
-#       - ./plugins:/opt/airflow/plugins
-#     healthcheck:
-#       test: ["CMD", "curl", "--fail", "http://localhost:8080/health"]
-#       interval: 30s
-#       timeout: 10s
-#       retries: 5
-#     restart: unless-stopped
-
-#   airflow-scheduler:
-#     image: apache/airflow:2.9.3
-#     container_name: airflow-scheduler
-#     depends_on:
-#       - airflow-init
-#     environment:
-#       AIRFLOW__CORE__EXECUTOR: CeleryExecutor
-#       AIRFLOW__DATABASE__SQL_ALCHEMY_CONN: postgresql+psycopg2://airflow:airflow@postgres/airflow
-#       AIRFLOW__CELERY__BROKER_URL: redis://redis:6379/0
-#       AIRFLOW__CELERY__RESULT_BACKEND: db+postgresql://airflow:airflow@postgres/airflow
-#       AIRFLOW__CORE__FERNET_KEY: "6tCbbQdW_VyQAVDsYiwGm0hD59mPEUrZBhexfdSjFQ0="
-#       # python -c "from cryptography.fernet import Fernet; print(Fernet.generate_key().decode())"                
-#       AIRFLOW_UID: 50000
-#       AIRFLOW__API__AUTH_BACKENDS: airflow.api.auth.backend.basic_auth
-#     command: scheduler
-#     volumes:
-#       - ./dags:/opt/airflow/dags
-#       - ./logs:/opt/airflow/logs
-#       - ./plugins:/opt/airflow/plugins
-#     restart: unless-stopped
-
-#   airflow-worker:
-#     image: apache/airflow:2.9.3
-#     container_name: airflow-worker
-
-#     depends_on:
-#       - airflow-init
-
-#     environment:
-#       AIRFLOW__CORE__EXECUTOR: CeleryExecutor
-#       AIRFLOW__DATABASE__SQL_ALCHEMY_CONN: postgresql+psycopg2://airflow:airflow@postgres/airflow
-#       AIRFLOW__CELERY__BROKER_URL: redis://redis:6379/0
-#       AIRFLOW__CELERY__RESULT_BACKEND: db+postgresql://airflow:airflow@postgres/airflow
-#       AIRFLOW__CORE__FERNET_KEY: "6tCbbQdW_VyQAVDsYiwGm0hD59mPEUrZBhexfdSjFQ0="
-#       # python -c "from cryptography.fernet import Fernet; print(Fernet.generate_key().decode())"                
-#       AIRFLOW_UID: 50000
-#       AIRFLOW__API__AUTH_BACKENDS: airflow.api.auth.backend.basic_auth
-
-#     command: airflow celery worker
-
-#     volumes:
-#       - ./dags:/opt/airflow/dags
-#       - ./logs:/opt/airflow/logs
-#       - ./plugins:/opt/airflow/plugins
-
-#     restart: unless-stopped
-
-# volumes:
-#   postgres-db-volume:

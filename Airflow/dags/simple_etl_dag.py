@@ -1,83 +1,74 @@
-from airflow import DAG
-from airflow.operators.python import PythonOperator
+from airflow.sdk import dag, task 
 from datetime import datetime
 import pandas as pd
 import os
 
-# ------------------------
-# Extract Step
-# ------------------------
-def extract():
-    data = [
-        {"product": "Laptop", "price": 50000, "quantity": 2},
-        {"product": "Mouse", "price": 500, "quantity": 5},
-        {"product": "Keyboard", "price": 1500, "quantity": 3},
-    ]
-
-    df = pd.DataFrame(data)
-
-    os.makedirs("/tmp/etl", exist_ok=True)
-
-    df.to_csv("/tmp/etl/extracted_data.csv", index=False)
-
-    print("Data Extracted")
-    print(df)
 
 
-# ------------------------
-# Transform Step
-# ------------------------
-def transform():
-    df = pd.read_csv("/tmp/etl/extracted_data.csv")
+@dag(
+        dag_id="simple_etl_pipeline",
+        start_date=datetime(2025, 1, 1),
+        schedule="@daily",
+        catchup=False,
+        tags=["etl", "example"],
+        is_paused_upon_creation=False
+)
+def execute():
 
-    df["total_price"] = df["price"] * df["quantity"]
+    # ------------------------
+    # Extract Step
+    # ------------------------
+    @task.python
+    def extract():
+        data = [
+            {"product": "Laptop", "price": 50000, "quantity": 2},
+            {"product": "Mouse", "price": 500, "quantity": 5},
+            {"product": "Keyboard", "price": 1500, "quantity": 3},
+        ]
 
-    df.to_csv("/tmp/etl/transformed_data.csv", index=False)
+        df = pd.DataFrame(data)
 
-    print("Data Transformed")
-    print(df)
+        os.makedirs("/tmp/etl", exist_ok=True)
 
+        df.to_csv("/tmp/etl/extracted_data.csv", index=False)
 
-# ------------------------
-# Load Step
-# ------------------------
-def load():
-    df = pd.read_csv("/tmp/etl/transformed_data.csv")
-
-    output_path = "/tmp/etl/final_output.csv"
-
-    df.to_csv(output_path, index=False)
-
-    print("Data Loaded")
-    print(f"Final file saved at: {output_path}")
-    print(df)
+        print("Data Extracted")
+        print(df)
 
 
-# ------------------------
-# DAG Definition
-# ------------------------
-with DAG(
-    dag_id="simple_etl_pipeline",
-    start_date=datetime(2025, 1, 1),
-    schedule="@daily",
-    catchup=False,
-    tags=["etl", "example"],
-) as dag:
+    # ------------------------
+    # Transform Step
+    # ------------------------
+    @task.python
+    def transform():
+        df = pd.read_csv("/tmp/etl/extracted_data.csv")
 
-    extract_task = PythonOperator(
-        task_id="extract_task",
-        python_callable=extract,
-    )
+        df["total_price"] = df["price"] * df["quantity"]
 
-    transform_task = PythonOperator(
-        task_id="transform_task",
-        python_callable=transform,
-    )
+        df.to_csv("/tmp/etl/transformed_data.csv", index=False)
 
-    load_task = PythonOperator(
-        task_id="load_task",
-        python_callable=load,
-    )
+        print("Data Transformed")
+        print(df)
+
+
+    # ------------------------
+    # Load Step
+    # ------------------------
+    @task.python
+    def load():
+        df = pd.read_csv("/tmp/etl/transformed_data.csv")
+
+        output_path = "/tmp/etl/final_output.csv"
+
+        df.to_csv(output_path, index=False)
+
+        print("Data Loaded")
+        print(f"Final file saved at: {output_path}")
+        print(df)
+
 
     # ETL Flow
-    extract_task >> transform_task >> load_task
+    extract() >> transform() >> load()
+
+# Instantiating the DAG
+execute()
